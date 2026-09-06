@@ -1,0 +1,40 @@
+name: Release WeebHub OBS Integration
+
+on:
+  push:
+    tags: ['obs-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify bridge
+        run: |
+          python -m py_compile bridge/weebhub_bridge.py
+          python bridge/weebhub_bridge.py --help
+
+      - name: Package source release
+        run: |
+          git archive --format=zip --prefix="WeebHub-OBS-Integration-${GITHUB_REF_NAME}/" HEAD > "WeebHub-OBS-Integration-${GITHUB_REF_NAME}.zip"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WeebHub OBS Integration ${{ github.ref_name }}
+          files: WeebHub-OBS-Integration-${{ github.ref_name }}.zip
+          fail_on_unmatched_files: true
+          body: |
+            Local-only OBS Studio metadata bridge for WeebHub.
+
+            WeebHub is a GPL-3.0 modified fork of Seanime by 5rahim and contributors. See `UPSTREAM.md` and `LICENSE`.

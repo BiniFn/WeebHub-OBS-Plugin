@@ -1,0 +1,29 @@
+name: Verify WeebHub OBS Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile bridge
+        run: python -m py_compile bridge/weebhub_bridge.py
+
+      - name: Exercise command-line interface
+        run: python bridge/weebhub_bridge.py --help
