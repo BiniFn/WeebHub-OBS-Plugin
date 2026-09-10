@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>WeebHub Overlay</title>
+<style>
+  :root {
+    --accent: #7c5cff;
+    --card-bg: rgba(10, 10, 14, 0.74);
+    --fg: #ffffff;
+    --muted: rgba(255, 255, 255, 0.62);
+    --track: rgba(255, 255, 255, 0.16);
+    --radius: 14px;
+    --cover-w: 84px;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    padding: 28px;
+    pointer-events: none;
+  }
+  #stage.pos-bottom-left  { align-items: flex-end;   justify-content: flex-start; }
+  #stage.pos-bottom-right { align-items: flex-end;   justify-content: flex-end; }
+  #stage.pos-top-left     { align-items: flex-start; justify-content: flex-start; }
+  #stage.pos-top-right    { align-items: flex-start; justify-content: flex-end; }
+
+  #card {
+    display: none;
+    align-items: center;
+    gap: 14px;
+    max-width: 560px;
+    padding: 12px 18px 12px 12px;
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    transform-origin: center;
+  }
+  #card.visible { display: flex; }
+  #card.enter { animation: rise 320ms cubic-bezier(.22,.9,.3,1) both; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  #cover {
+    width: var(--cover-w);
+    height: calc(var(--cover-w) * 1.4);
+    border-radius: 9px;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.06);
+    flex: 0 0 auto;
+    display: none;
+  }
+  #cover.visible { display: block; }
+
+  #meta { min-width: 0; flex: 1 1 auto; }
+
+  #title {
+    font-size: 19px;
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #episode {
+    margin-top: 3px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #progress {
+    margin-top: 11px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--track);
+    overflow: hidden;
+    display: none;
+  }
+  #progress.visible { display: block; }
+  #progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 180ms linear;
+  }
+  #card.paused #progress-fill { background: var(--muted); }
+
+  #badge {
+    flex: 0 0 auto;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    display: none;
+  }
+  #badge.visible { display: block; }
+
+  /* Theme: light cards for bright scenes */
+  body.theme-light {
+    --card-bg: rgba(255, 255, 255, 0.86);
+    --fg: #101014;
+    --muted: rgba(16, 16, 20, 0.6);
+    --track: rgba(16, 16, 20, 0.14);
+  }
+  body.theme-light #card { border-color: rgba(0, 0, 0, 0.08); }
+  body.theme-light #badge { border-color: rgba(0, 0, 0, 0.16); }
+</style>
+</head>
+<body>
+  <div id="stage" class="pos-bottom-left">
+    <div id="card">
+      <img id="cover" alt="" />
+      <div id="meta">
+        <div id="title">—</div>
+        <div id="episode"></div>
+        <div id="progress"><div id="progress-fill"></div></div>
+      </div>
+      <div id="badge">Paused</div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- config from query string -------------------------------------------
+  // e.g. weebhub-overlay.html?host=127.0.0.1&port=8710&position=bottom-left&scale=1
+  var qs = new URLSearchParams(location.search);
+  var host = qs.get("host") || "127.0.0.1";
+  var port = qs.get("port") || "8710";
+  var base = "http://" + host + ":" + port;
+
+  var show = (qs.get("show") || "cover,title,episode,progress")
+    .split(",").map(function (s) { return s.trim(); });
+  function wants(part) { return show.indexOf(part) !== -1; }
+
+  var position = qs.get("position") || "bottom-left";
+  var stage = document.getElementById("stage");
+  stage.className = "pos-" + position;
+
+  if (qs.get("theme") === "light") document.body.classList.add("theme-light");
+  if (qs.get("accent")) {
+    document.documentElement.style.setProperty("--accent", qs.get("accent"));
+  }
+  var scale = parseFloat(qs.get("scale") || "1");
+  if (isFinite(scale) && scale > 0) {
+    document.getElementById("card").style.transform = "scale(" + scale + ")";
+  }
+  if (qs.get("cover") === "0" || !wants("cover")) {
+    document.getElementById("cover").style.display = "none";
+  }
+  if (!wants("progress")) document.getElementById("progress").style.display = "none";
+
+  // ---- elements -----------------------------------------------------------
+  var card = document.getElementById("card");
+  var coverEl = document.getElementById("cover");
+  var titleEl = document.getElementById("title");
+  var episodeEl = document.getElementById("episode");
+  var progressEl = document.getElementById("progress");
+  var fillEl = document.getElementById("progress-fill");
+  var badgeEl = document.getElementById("badge");
+
+  // ---- state --------------------------------------------------------------
+  var last = null;        // last state from the bridge
+  var lastAt = 0;         // performance.now() when it arrived
+  var revealed = false;
+  var coverKey = null;
+
+  function fmtTime(sec) {
+    if (!isFinite(sec) || sec < 0) return "0:00";
+    var s = Math.floor(sec % 60);
+    var m = Math.floor((sec / 60) % 60);
+    var h = Math.floor(sec / 3600);
+    var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+    return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
+  }
+
+  // Extrapolate position between bridge updates so the bar moves smoothly.
+  function livePosition() {
+    if (!last) return 0;
+    var pos = Number(last.position_sec) || 0;
+    if (last.playback_state === "playing") {
+      pos += (performance.now() - lastAt) / 1000;
+    }
+    var dur = Number(last.duration_sec) || 0;
+    if (dur > 0 && pos > dur) pos = dur;
+    return pos;
+  }
+
+  function render() {
+    if (!last) return;
+
+    var idle = last.connection === "no-player" || last.playback_state === "stopped";
+    if (idle) {
+      card.classList.remove("visible", "enter");
+      revealed = false;
+      return;
+    }
+
+    var title = last.anime_title || "WeebHub";
+    if (titleEl.textContent !== title) titleEl.textContent = title;
+
+    var epBits = [];
+    if (last.episode != null && last.episode !== "") epBits.push("Episode " + last.episode);
+    if (last.episode_title) epBits.push(last.episode_title);
+    var ep = epBits.join(" — ");
+    if (episodeEl.textContent !== ep) episodeEl.textContent = ep;
+    episodeEl.style.display = ep ? "" : "none";
+
+    var dur = Number(last.duration_sec) || 0;
+    if (dur > 0) {
+      var pos = livePosition();
+      fillEl.style.width = Math.min(100, (pos / dur) * 100) + "%";
+      progressEl.classList.add("visible");
+      progressEl.title = fmtTime(pos) + " / " + fmtTime(dur);
+    } else {
+      progressEl.classList.remove("visible");
+    }
+
+    var paused = last.playback_state === "paused";
+    card.classList.toggle("paused", paused);
+    badgeEl.classList.toggle("visible", paused);
+
+    // Cover art — only reload when the track actually changes.
+    var url = last.cover_art_url;
+    if (url) {
+      if (!/^https?:/i.test(url)) url = base + (url.charAt(0) === "/" ? "" : "/") + url;
+      if (coverKey !== url) {
+        coverKey = url;
+        coverEl.src = url;
+        coverEl.classList.add("visible");
+      }
+    } else {
+      coverKey = null;
+      coverEl.removeAttribute("src");
+      coverEl.classList.remove("visible");
+    }
+
+    if (!revealed) {
+      revealed = true;
+      card.classList.add("visible", "enter");
+      setTimeout(function () { card.classList.remove("enter"); }, 400);
+    }
+  }
+
+  setInterval(render, 100);
+
+  // ---- transport: SSE, with polling fallback ------------------------------
+  function applyState(s) {
+    if (!s) return;
+    last = s;
+    lastAt = performance.now();
+  }
+
+  var pollTimer = null;
+  function startPolling() {
+    if (pollTimer) return;
+    var tick = function () {
+      fetch(base + "/api/state", { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(applyState)
+        .catch(function () { /* bridge offline; keep trying */ });
+    };
+    tick();
+    pollTimer = setInterval(tick, 1000);
+  }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  var es = null;
+  function startSSE() {
+    if (!("EventSource" in window)) { startPolling(); return; }
+    try {
+      es = new EventSource(base + "/api/stream");
+    } catch (e) { startPolling(); return; }
+
+    es.addEventListener("state", function (ev) {
+      stopPolling();
+      try { applyState(JSON.parse(ev.data)); } catch (e) { /* ignore */ }
+    });
+
+    es.onopen = function () { stopPolling(); };
+
+    es.onerror = function () {
+      // EventSource retries on its own; poll meanwhile so the overlay
+      // never goes stale if SSE is blocked (e.g. some CEF builds).
+      startPolling();
+    };
+  }
+
+  // Kick off: one immediate fetch so the overlay paints fast, then SSE.
+  fetch(base + "/api/state", { cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (s) { applyState(s); render(); })
+    .catch(function () { /* handled by SSE/poll fallback below */ });
+
+  startSSE();
+
+  window.addEventListener("beforeunload", function () {
+    if (es) es.close();
+    stopPolling();
+  });
+})();
+</script>
+</body>
+</html>
