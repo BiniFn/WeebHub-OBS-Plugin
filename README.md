@@ -24,10 +24,10 @@ This repository ships **two** things:
 |---|---|---|
 | **Bridge** | `bridge/weebhub_bridge.py` | A dependency-free local server that exposes current WeebHub playback state over HTTP, SSE and WebSocket. |
 | **Overlay** | `overlay/weebhub-overlay.html` | A single-file overlay you add to OBS as a **Browser Source**. It connects to the bridge and renders the now-playing card. |
+| **Text script** | `plugin/weebhub-nowplaying.lua` | An optional OBS Lua script that writes title and progress to any existing Text source. |
 
-There is **no OBS plugin binary and no OBS Lua script.** OBS has no scripting API that this
-project needs — a Browser Source is the supported integration path, and it works on every
-OS OBS runs on.
+There is no compiled OBS plugin binary. Use the Browser Source for the styled card, or load
+the included Lua script from **Tools → Scripts** for a native Text-source workflow.
 
 The bridge is deliberately local-only and exposes presentation-safe metadata (title, episode,
 playback state, progress, cover art) — not WeebHub account access or credentials.
@@ -44,11 +44,17 @@ Python 3.8+ only; no packages to install.
 ```bash
 git clone https://github.com/BiniFn/WeebHub-OBS-Plugin.git
 cd WeebHub-OBS-Plugin
-python3 bridge/weebhub_bridge.py --host 127.0.0.1 --port 8710
+python3 bridge/weebhub_bridge.py --weebhub-url http://127.0.0.1:43211
 ```
 
-Add `--demo` to run it without WeebHub connected — it simulates playback so you can
-set the overlay up before wiring the real player in.
+The bridge now follows local WeebHub playback automatically. Add `--demo` to set up an
+overlay without WeebHub running; it simulates playback instead.
+
+If the WeebHub server has a password, pass its SHA-256 token (not the raw password):
+
+```bash
+python3 bridge/weebhub_bridge.py --weebhub-url http://127.0.0.1:43211 --weebhub-token YOUR_SHA256_TOKEN
+```
 
 Verify it's alive:
 
@@ -123,6 +129,7 @@ token is required — the bridge is always the server.
 python3 -m py_compile bridge/weebhub_bridge.py
 python3 bridge/weebhub_bridge.py --help
 python3 bridge/weebhub_bridge.py --demo   # simulated player source
+python3 bridge/weebhub_bridge.py --weebhub-url http://127.0.0.1:43211
 ```
 
 ## Credits and Fork Attribution

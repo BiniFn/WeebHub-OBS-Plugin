@@ -39,7 +39,10 @@ import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -99,7 +102,8 @@ class StateStore:
         with self._lock:
             self._state.update(fields)
             self._revision += 1
-            self._state["connection"] = "connected"
+            if "connection" not in fields:
+                self._state["connection"] = "connected"
             snapshot = dict(self._state)
             snapshot["revision"] = self._revision
         self._publish(snapshot)
@@ -128,6 +132,74 @@ class StateStore:
                 self._subscribers.remove(cb)
             except ValueError:
                 pass
+
+
+def weebhub_state_to_bridge_state(payload):
+    """Map the authenticated WeebHub API envelope to the public overlay state."""
+    if not isinstance(payload, dict):
+        raise ValueError("WeebHub response must be a JSON object")
+    if payload.get("error"):
+        raise ValueError(f"WeebHub API error: {payload['error']}")
+
+    state = payload.get("data", payload)
+    if not isinstance(state, dict):
+        raise ValueError("WeebHub response data must be a JSON object")
+
+    connection = state.get("connection") or "no-player"
+    playback_state = state.get("playbackState") or "stopped"
+    if connection != "connected":
+        playback_state = "stopped"
+
+    cover_art_url = state.get("coverArtUrl") or "/api/cover"
+    return {
+        "anime_title": state.get("animeTitle") or "Not connected",
+        "episode": state.get("episode"),
+        "episode_title": "",
+        "playback_state": playback_state,
+        "position_sec": state.get("positionSec") or 0.0,
+        "duration_sec": state.get("durationSec") or 0.0,
+        "cover_art_url": cover_art_url,
+        "connection": connection,
+    }
+
+
+def run_weebhub_source(store: StateStore, url: str, token: Optional[str], interval: float):
+    """Poll the authenticated WeebHub now-playing endpoint into the bridge."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("--weebhub-url must be an absolute http(s) URL")
+
+    endpoint = url.rstrip("/") + "/api/v1/streamer/now-playing"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["X-WeebHub-Token"] = token
+
+    last_error = None
+    while True:
+        try:
+            request = Request(endpoint, headers=headers)
+            with urlopen(request, timeout=3) as response:
+                payload = json.load(response)
+            store.set(**weebhub_state_to_bridge_state(payload))
+            last_error = None
+        except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+            # Keep the overlay hidden instead of displaying stale playback when
+            # the server is unavailable or its authentication token is wrong.
+            store.set(
+                anime_title="Not connected",
+                episode=None,
+                episode_title="",
+                playback_state="stopped",
+                position_sec=0.0,
+                duration_sec=0.0,
+                cover_art_url="",
+                connection="no-player",
+            )
+            error = str(exc)
+            if error != last_error:
+                print(f"[bridge] WeebHub source unavailable: {error}", file=sys.stderr)
+                last_error = error
+        time.sleep(interval)
 
 
 # --------------------------------------------------------------------------
@@ -442,13 +514,32 @@ def main():
     ap.add_argument("--port", type=int, default=8710)
     ap.add_argument("--demo", action="store_true",
                     help="run the simulated player source")
+    ap.add_argument("--weebhub-url",
+                    help="base URL of the local WeebHub server, e.g. http://127.0.0.1:43211")
+    ap.add_argument("--weebhub-token",
+                    help="optional SHA-256 server-password token for a protected WeebHub server")
+    ap.add_argument("--weebhub-poll-ms", type=int, default=1000,
+                    help="poll interval for --weebhub-url (minimum 250 ms)")
     args = ap.parse_args()
+
+    if args.demo and args.weebhub_url:
+        ap.error("--demo and --weebhub-url cannot be used together")
+    if args.weebhub_poll_ms < 250:
+        ap.error("--weebhub-poll-ms must be at least 250")
 
     store = StateStore()
     if args.demo or os.environ.get("WEEBHUB_DEMO"):
         t = threading.Thread(target=run_demo, args=(store,), daemon=True)
         t.start()
         print(f"[bridge] demo player source enabled (updates every 1s)")
+    elif args.weebhub_url:
+        t = threading.Thread(
+            target=run_weebhub_source,
+            args=(store, args.weebhub_url, args.weebhub_token, args.weebhub_poll_ms / 1000),
+            daemon=True,
+        )
+        t.start()
+        print(f"[bridge] following WeebHub playback from {args.weebhub_url.rstrip('/')}")
 
     server = BridgeServer((args.host, args.port), store)
     print(f"[bridge] WeebHub local bridge listening on http://{args.host}:{args.port}")

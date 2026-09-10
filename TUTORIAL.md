@@ -12,11 +12,11 @@ Where something is not yet finished, it says so.
 | **OBS Studio** | obsproject.com (free) | Not currently installed on this Mac — step 1. |
 | **The bridge** | `bridge/weebhub_bridge.py` in this repo | Python 3.8+ only. No `pip install` of anything. |
 | **The overlay** | `overlay/weebhub-overlay.html` in this repo | Single file. No build step. |
-| **A WeebHub server** | optional for now | Only needed once the player-feed hook exists (step 7). |
+| **A WeebHub server** | optional | Needed for live playback; `--demo` works without one. |
 
-You do **not** need a compiled OBS plugin, a `.lua` script, or any OBS SDK.
-OBS has no scripting API this project needs — a **Browser Source** is the supported path,
-and it works identically on macOS, Windows and Linux.
+You do not need a compiled OBS plugin or any OBS SDK. A **Browser Source** gives you the
+styled card on every OS; the included `.lua` script is optional when you prefer an existing
+OBS Text source.
 
 ---
 
@@ -70,11 +70,15 @@ Leave this terminal window open. Expected output:
 [bridge] WeebHub local bridge listening on http://127.0.0.1:8710
 ```
 
-### Real mode (once step 7 is done)
+### Real mode
 
 ```bash
-python3 bridge/weebhub_bridge.py --host 127.0.0.1 --port 8710
+python3 bridge/weebhub_bridge.py --weebhub-url http://127.0.0.1:43211
 ```
+
+The bridge polls WeebHub's authenticated now-playing endpoint and immediately updates the
+overlay for normal, streamed, paused, and idle playback. For a password-protected server,
+also pass its SHA-256 password token with `--weebhub-token`.
 
 ### Confirm it's alive
 
@@ -184,27 +188,14 @@ curl -N http://127.0.0.1:8710/api/stream   # live SSE push (Ctrl-C to stop)
 
 ## 7. Feeding real WeebHub playback into the bridge
 
-**Status: not wired up yet.** This is the one gap left.
+Start the bridge with `--weebhub-url` as shown in step 3. It polls
+`/api/v1/streamer/now-playing` locally and translates WeebHub's playback state into the
+overlay's public metadata feed. No account information, local paths, or player controls are
+published to OBS. The overlay hides while no player is tracked and reflects both paused and
+streamed playback.
 
-The bridge is a *server*. Something has to tell it what's playing. Right now the only
-thing that does is `--demo`. The intended production path is a small hook in the
-WeebHub player that POSTs (or calls in-process) the current state on play/pause/seek/
-episode-change:
-
-```json
-{
-  "anime_title": "Frieren: Beyond Journey's End",
-  "episode": 12,
-  "episode_title": "A Real Hero",
-  "playback_state": "playing",
-  "position_sec": 342.0,
-  "duration_sec": 1440.0,
-  "cover_art_url": "/api/cover"
-}
-```
-
-Until that hook exists, the overlay works with `--demo` but will not follow your actual
-WeebHub playback. Ask if you want that hook built next — it's the natural follow-on.
+For a password-protected server, use the SHA-256 token that WeebHub clients use for the
+`X-WeebHub-Token` header. Do not put the raw password in an OBS scene or a public URL.
 
 ---
 
