@@ -169,6 +169,13 @@ def _make_cover_png(seed_text: str, width: int = 128, height: int = 180) -> byte
 # --------------------------------------------------------------------------
 # WebSocket (RFC6455) minimal server implementation
 # --------------------------------------------------------------------------
+def _ws_accept_for_key(key: str) -> str:
+    """Compute the Sec-WebSocket-Accept value for a client key."""
+    return base64.b64encode(
+        hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+    ).decode("ascii")
+
+
 class WebSocketConnection:
     """One upgraded client connection. Server frames are unmasked (per spec)."""
 
@@ -176,8 +183,9 @@ class WebSocketConnection:
         self.sock = sock
         self.store = store
         self.closed = False
+        self._send_lock = threading.Lock()
 
-    def push_state(self):
+    def send_state(self):
         if self.store is not None:
             self.send_text(json.dumps(self.store.get()))
 
@@ -193,11 +201,13 @@ class WebSocketConnection:
         else:
             header.append(127)
             header += struct.pack(">Q", n)
-        self.sock.sendall(bytes(header) + data)
+        with self._send_lock:
+            self.sock.sendall(bytes(header) + data)
 
     def send_close(self, code: int = 1000):
         try:
-            self.sock.sendall(struct.pack(">BH", 0x88, code))
+            with self._send_lock:
+                self.sock.sendall(struct.pack(">BH", 0x88, code))
         except OSError:
             pass
         self.closed = True
@@ -212,7 +222,15 @@ class WebSocketConnection:
         return buf
 
     def serve(self):
-        """Frame loop. Handles text, ping, close. Pushes state on subscribe."""
+        """Frame loop. Handles text, ping, close. Pushes state on every change."""
+
+        def _on_change(snapshot):
+            try:
+                self.send_text(json.dumps(snapshot))
+            except OSError:
+                self.closed = True
+
+        self.store.subscribe(_on_change)
         try:
             self.sock.settimeout(None)
             # Send current state immediately on connect.
@@ -239,40 +257,22 @@ class WebSocketConnection:
                     self.send_close()
                     return
                 if opcode == 0x9:  # ping -> pong
-                    self.sock.sendall(bytes([0x8A, len(payload)]) + payload)
+                    with self._send_lock:
+                        self.sock.sendall(bytes([0x8A, len(payload)]) + payload)
                 elif opcode == 0xA:  # pong
                     pass
                 elif opcode in (0x1, 0x0) and fin:  # text / final
                     msg = payload.decode("utf-8", "replace")
-                    if '"subscribe"' in msg or "subscribe" in msg:
+                    if "subscribe" in msg:
                         self.send_state()
         except (ConnectionError, OSError):
             pass
         finally:
+            self.store.unsubscribe(_on_change)
             try:
                 self.sock.close()
             except OSError:
                 pass
-
-
-def _ws_handshake(sock: socket.socket, request_headers: bytes) -> bool:
-    key = None
-    for line in request_headers.split(b"\r\n"):
-        if line.lower().startswith(b"sec-websocket-key:"):
-            key = line.split(b":", 1)[1].strip()
-    if not key:
-        return False
-    accept = base64.b64encode(
-        hashlib.sha1(key + WS_GUID.encode("ascii")).digest()
-    ).decode("ascii")
-    resp = (
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
-    )
-    sock.sendall(resp.encode("ascii"))
-    return True
 
 
 # --------------------------------------------------------------------------
@@ -306,8 +306,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_ws_upgrade(self):
+        """Complete the RFC6455 handshake, then hand the raw socket to a
+        WebSocketConnection. Runs on this request's own thread, so the
+        blocking frame loop below never stalls other clients."""
+        key = self.headers.get("Sec-WebSocket-Key", "").strip()
+        if not key:
+            self._json(400, {"error": "missing Sec-WebSocket-Key"})
+            return
+
+        self.wfile.write(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {_ws_accept_for_key(key)}\r\n\r\n"
+            ).encode("ascii")
+        )
+        self.wfile.flush()
+        # We own the socket from here; stop BaseHTTPRequestHandler from
+        # reading another request off it or closing it under us.
+        self.close_connection = True
+
+        try:
+            WebSocketConnection(self.connection, self.store).serve()
+        except (ConnectionError, OSError):
+            pass
+
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/ws":
+            self._handle_ws_upgrade()
+            return
         if path == "/api/health":
             self._json(200, {"status": "ok", "service": "weebhub-bridge", **self.store.get()})
         elif path == "/api/state":
@@ -371,53 +401,6 @@ class BridgeServer(ThreadingHTTPServer):
         self.store = store
         BridgeHandler.store = store
 
-    def finish_request(self, request, client_address):
-        # Detect WebSocket upgrade before the normal handler path.
-        try:
-            sock = request
-            sock.settimeout(2)
-            data = b""
-            while b"\r\n\r\n" not in data:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            if data.startswith(b"GET") and b"Upgrade: websocket" in data and b"/ws" in data.split(b" ")[1] if b" " in data else False:
-                if _ws_handshake(sock, data):
-                    ws = WebSocketConnection(sock, self._ws_send_state)
-                    ws.serve()
-                    return
-            # Not (or failed) WS: push the buffered request back through a
-            # wrapped socket so BaseHTTPRequestHandler can read it.
-            import io
-            class _Rewind:
-                def __init__(self, sock, pre):
-                    self.sock = sock
-                    self.pre = io.BytesIO(pre)
-                def recv(self, n):
-                    if self.pre.tell() < len(self.pre.getbuffer()):
-                        return self.pre.read(n)
-                    return self.sock.recv(n)
-                def sendall(self, b):
-                    self.sock.sendall(b)
-                def __getattr__(self, name):
-                    return getattr(self.sock, name)
-                def close(self):
-                    self.sock.close()
-            super().finish_request(_Rewind(sock, data), client_address)
-            return
-        except (ConnectionError, OSError, socket.timeout):
-            try:
-                request.close()
-            except OSError:
-                pass
-            return
-        super().finish_request(request, client_address)
-
-    def _ws_send_state(self):
-        # Bound per-connection; re-bound by WebSocketConnection constructor.
-        return None
-
 
 def run_demo(store: StateStore, interval: float = 1.0):
     """Simulate a player so the full pipeline is exercisable without WeebHub."""
@@ -468,13 +451,8 @@ def main():
         print(f"[bridge] demo player source enabled (updates every 1s)")
 
     server = BridgeServer((args.host, args.port), store)
-    # Fix WS state fan-out: each connection binds its own send callback.
-    def make_send():
-        def send():
-            pass
-        return send
-
     print(f"[bridge] WeebHub local bridge listening on http://{args.host}:{args.port}")
+    print(f"[bridge]   GET /api/health  (liveness + uptime)")
     print(f"[bridge]   GET /api/state   (JSON polling)")
     print(f"[bridge]   GET /api/cover   (PNG cover art)")
     print(f"[bridge]   GET /api/stream  (SSE push)")
