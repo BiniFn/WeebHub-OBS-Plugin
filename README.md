@@ -34,6 +34,9 @@ playback state, progress, cover art) — not WeebHub account access or credentia
 
 ## Setup
 
+> **Step-by-step walkthrough with troubleshooting: [`TUTORIAL.md`](TUTORIAL.md).**
+> The summary below is the short version.
+
 ### 1. Run the bridge
 
 Python 3.8+ only; no packages to install.
